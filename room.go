@@ -1,8 +1,10 @@
 package bingo
 
 import (
+	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"math/rand/v2"
 	"net"
 	"slices"
@@ -12,9 +14,9 @@ import (
 )
 
 type Room interface {
-	AddPlayer(net.Conn, string, int) (int, error)
-	RemovePlayer(net.Conn)
-	HandlePlayerRequest(int, any) error
+	AddPlayer(context.Context, net.Conn, string, int) (int, error)
+	RemovePlayer(context.Context, net.Conn)
+	HandlePlayerRequest(context.Context, int, any) error
 }
 
 type room struct {
@@ -34,7 +36,7 @@ func NewRoom(maxPlayers int, colors []uint32) Room {
 	}
 }
 
-func (r *room) AddPlayer(conn net.Conn, name string, prefColor int) (int, error) {
+func (r *room) AddPlayer(ctx context.Context, conn net.Conn, name string, prefColor int) (int, error) {
 	r.Lock()
 	defer r.Unlock()
 
@@ -49,6 +51,7 @@ func (r *room) AddPlayer(conn net.Conn, name string, prefColor int) (int, error)
 		Conn:  conn,
 	}
 	r.NumPlayers += 1
+	Logger(ctx).Info("connected", slog.Int("slot", slot))
 
 	// When the first player joins an empty room, reset the board...?
 	if r.NumPlayers == 1 {
@@ -100,7 +103,7 @@ func (r *room) AddPlayer(conn net.Conn, name string, prefColor int) (int, error)
 	return slot, nil
 }
 
-func (r *room) RemovePlayer(conn net.Conn) {
+func (r *room) RemovePlayer(ctx context.Context, conn net.Conn) {
 	r.Lock()
 	defer r.Unlock()
 
@@ -110,6 +113,7 @@ func (r *room) RemovePlayer(conn net.Conn) {
 	if slot < 0 {
 		return
 	}
+	Logger(ctx).Info("disconnected", slog.Int("slot", slot))
 
 	r.Players[slot] = nil
 	r.NumPlayers -= 1
@@ -119,20 +123,20 @@ func (r *room) RemovePlayer(conn net.Conn) {
 	})
 }
 
-func (r *room) HandlePlayerRequest(slot int, m any) error {
+func (r *room) HandlePlayerRequest(ctx context.Context, slot int, m any) error {
 	if _, ok := m.(*message.Hello); ok {
 		return nil
 	} else if req, ok := m.(*message.Board); ok {
-		return r.GenerateNewBoard(req.Config)
+		return r.GenerateNewBoard(ctx, req.Config)
 	} else if req, ok := m.(*message.PlayerCompletion); ok {
-		return r.SetPlayerCompletion(slot, req.Completion)
+		return r.SetPlayerCompletion(ctx, slot, req.Completion)
 	} else if req, ok := m.(*message.PlayerLocation); ok {
-		return r.SetPlayerLocation(slot, req.Location)
+		return r.SetPlayerLocation(ctx, slot, req.Location)
 	}
 	return errors.New("unhandled player request")
 }
 
-func (r *room) GenerateNewBoard(cfg string) error {
+func (r *room) GenerateNewBoard(ctx context.Context, cfg string) error {
 	r.Lock()
 	defer r.Unlock()
 
@@ -140,18 +144,21 @@ func (r *room) GenerateNewBoard(cfg string) error {
 		Seed:   rand.Uint32(),
 		Config: cfg,
 	}
+	Logger(ctx).Info("generated new board", slog.Int("seed", int(r.Board.Seed)), slog.String("config", r.Board.Config))
 
 	r.broadcast(&r.Board)
 	return nil
 }
 
-func (r *room) SetPlayerCompletion(slot int, v uint32) error {
+func (r *room) SetPlayerCompletion(ctx context.Context, slot int, v uint32) error {
 	r.Lock()
 	defer r.Unlock()
 
 	if r.Players[slot] == nil {
 		return errors.New("slot is empty")
 	}
+
+	Logger(ctx).Debug("update completion", slog.Int("completion", int(v)))
 
 	r.Players[slot].Completion = v
 	r.broadcast(&message.PlayerCompletion{
@@ -161,13 +168,15 @@ func (r *room) SetPlayerCompletion(slot int, v uint32) error {
 	return nil
 }
 
-func (r *room) SetPlayerLocation(slot int, v int16) error {
+func (r *room) SetPlayerLocation(ctx context.Context, slot int, v int16) error {
 	r.Lock()
 	defer r.Unlock()
 
 	if r.Players[slot] == nil {
 		return errors.New("slot is empty")
 	}
+
+	Logger(ctx).Debug("update location", slog.Int("location", int(v)))
 
 	r.Players[slot].Location = v
 	r.broadcast(&message.PlayerLocation{

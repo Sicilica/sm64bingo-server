@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
+	"io"
 	"log"
+	"log/slog"
 	"net"
 	"os"
 	"time"
 
+	"github.com/sicilica/slogging"
 	bingo "github.com/sicilica/sm64bingo-server"
 	"github.com/sicilica/sm64bingo-server/message"
 )
@@ -39,10 +43,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Fatal(listen(*port, handleConn))
+	ctx := context.Background()
+	ctx = bingo.WithLogger(ctx, slog.New(
+		slogging.NewPrettyHandler(os.Stdout, nil),
+	))
+
+	log.Fatal(listen(ctx, *port))
 }
 
-func listen(port int, fn func(*net.TCPConn) error) error {
+func listen(ctx context.Context, port int) error {
+	bingo.Logger(ctx).Info("listening", slog.Int("port", port))
+
 	lis, err := net.ListenTCP("tcp", &net.TCPAddr{
 		Port: port,
 	})
@@ -56,53 +67,75 @@ func listen(port int, fn func(*net.TCPConn) error) error {
 		if err != nil {
 			return err
 		}
-		go func() {
-			defer cli.Close()
-			err := fn(cli)
-			if err != nil {
-				log.Printf("%s: %v\n", cli.RemoteAddr().String(), err)
-			}
-		}()
+
+		go handleConn(ctx, cli)
 	}
 }
 
-func handleConn(conn *net.TCPConn) error {
+func handleConn(ctx context.Context, conn *net.TCPConn) {
+	logger := bingo.Logger(ctx).With("client", conn.RemoteAddr().String())
+	ctx = bingo.WithLogger(ctx, logger)
+
 	var room bingo.Room
 	var slot int
 
-	for {
-		if err := conn.SetReadDeadline(time.Now().Add(IDLE_TIMEOUT)); err != nil {
-			return err
+	defer conn.Close()
+	defer func() {
+		if room != nil {
+			room.RemovePlayer(ctx, conn)
 		}
-		h, err := message.ReadHeader(conn)
-		if err != nil {
-			return err
-		}
+	}()
 
-		if err := conn.SetReadDeadline(time.Now().Add(BODY_TIMEOUT)); err != nil {
-			return err
-		}
-		m, err := message.ReadBody(conn, h)
-		if err != nil {
-			return err
-		}
-
-		if room == nil {
-			hello, ok := m.(*message.Hello)
-			if !ok {
-				return errors.New("first message on connection must be hello")
+	err := func() error {
+		for {
+			if err := conn.SetReadDeadline(time.Now().Add(IDLE_TIMEOUT)); err != nil {
+				return err
+			}
+			h, err := message.ReadHeader(conn)
+			if err != nil {
+				if err == io.EOF {
+					return nil
+				}
+				return err
 			}
 
-			room = globalRoom
-			slot, err = room.AddPlayer(conn, hello.Name, hello.PreferredColor)
+			if err := conn.SetReadDeadline(time.Now().Add(BODY_TIMEOUT)); err != nil {
+				return err
+			}
+			m, err := message.ReadBody(conn, h)
 			if err != nil {
 				return err
 			}
-			defer room.RemovePlayer(conn)
-		} else {
-			if err := room.HandlePlayerRequest(slot, m); err != nil {
-				return err
+
+			if room == nil {
+				hello, ok := m.(*message.Hello)
+				if !ok {
+					return errors.New("first message on connection must be hello")
+				}
+
+				if hello.Name == "" {
+					return errors.New("hello without name")
+				}
+
+				logger = logger.With(slog.String("name", hello.Name))
+				ctx = bingo.WithLogger(ctx, logger)
+
+				room = globalRoom
+				slot, err = room.AddPlayer(ctx, conn, hello.Name, hello.PreferredColor)
+				if err != nil {
+					return err
+				}
+
+				logger = logger.With(slog.Int("slot", slot))
+				ctx = bingo.WithLogger(ctx, logger)
+			} else {
+				if err := room.HandlePlayerRequest(ctx, slot, m); err != nil {
+					return err
+				}
 			}
 		}
+	}()
+	if err != nil {
+		logger.ErrorContext(ctx, "connection error", slog.String("error", err.Error()))
 	}
 }
