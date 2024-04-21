@@ -25,7 +25,7 @@ type PlayerDisconnected struct {
 }
 
 type Board struct {
-	Seed   uint32 `json:"s"`
+	Seed   int32  `json:"s"`
 	Config string `json:"cfg"`
 }
 

@@ -141,7 +141,7 @@ func (r *room) GenerateNewBoard(ctx context.Context, cfg string) error {
 	defer r.Unlock()
 
 	r.Board = message.Board{
-		Seed:   rand.Uint32(),
+		Seed:   rand.Int32(),
 		Config: cfg,
 	}
 	Logger(ctx).Info("generated new board", slog.Int("seed", int(r.Board.Seed)), slog.String("config", r.Board.Config))
